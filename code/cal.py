@@ -31,6 +31,9 @@ from densenet import DenseNet3
 from generatingloaders import Normalizer, GaussianLoader, UniformLoader
 from resnet import ResNet34
 from wideresnet import WideResNet
+from getpass import getuser
+
+user = getuser()
 
 r_mean = 125.3 / 255
 g_mean = 123.0 / 255
@@ -39,18 +42,39 @@ r_std = 63.0 / 255
 g_std = 62.1 / 255
 b_std = 66.7 / 255
 
-train_transform = transforms.Compose([
+train_transform_cifar10 = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize((r_mean, g_mean, b_mean), (r_std, g_std, b_std)),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-test_transform = transforms.Compose([
+test_transform_cifar10 = transforms.Compose([
     transforms.CenterCrop((32, 32)),
     transforms.ToTensor(),
-    transforms.Normalize((r_mean, g_mean, b_mean), (r_std, g_std, b_std)),
+    # transforms.Normalize((r_mean, g_mean, b_mean), (r_std, g_std, b_std)),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
+
+train_transform_cifar100 = transforms.Compose(
+    [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            (0.5070751592371323, 0.48654887331495095, 0.4409178433670343),
+            (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)),
+    ]
+)
+test_transform_cifar100 = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize(
+            (0.5070751592371323, 0.48654887331495095, 0.4409178433670343),
+            (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)),
+    ])
 
 h_dict = {
     'cosine': CosineDeconf,
@@ -90,8 +114,15 @@ def get_args():
                         help='ce|kliep')
 
     # Data loading arguments
-    parser.add_argument('--data-dir', default='./data', type=str)
-    parser.add_argument('--out-dataset', default='Imagenet', type=str,
+    parser.add_argument('--in-dataset',
+                        default='CIFAR10',
+                        type=str,
+                        help='in-distribution dataset')
+    parser.add_argument('--data-dir', default=f'/home/{user}/data', type=str)
+    parser.add_argument('--out-dataset',
+                        # default='Imagenet',
+                        default='SVHN',
+                        type=str,
                         help='out-of-distribution dataset')
     parser.add_argument('--batch-size', default=64, type=int,
                         help='batch size')
@@ -114,24 +145,63 @@ def get_args():
     return parser.parse_args()
 
 
-def get_datasets(data_dir, data_name, batch_size):
-    train_set_in = torchvision.datasets.CIFAR10(root=f'{data_dir}/cifar10',
-                                                train=True, download=True,
-                                                transform=train_transform)
-    test_set_in = torchvision.datasets.CIFAR10(root=f'{data_dir}/cifar10',
-                                               train=False, download=True,
-                                               transform=test_transform)
+def get_datasets(data_dir, data_name, batch_size, data_in):
+    if data_in == 'CIFAR10':
+        train_set_in = torchvision.datasets.CIFAR10(
+            root=f'{data_dir}/cifar10',
+            train=True, download=True,
+            transform=train_transform_cifar10)
+        test_set_in = torchvision.datasets.CIFAR10(
+            root=f'{data_dir}/cifar10',
+            train=False, download=True,
+            transform=test_transform_cifar10)
+    elif data_in == 'CIFAR100':
+
+        train_set_in = torchvision.datasets.CIFAR10(
+            root=f'{data_dir}/cifar100',
+            train=True, download=True,
+            transform=train_transform_cifar100)
+        test_set_in = torchvision.datasets.CIFAR10(
+            root=f'{data_dir}/cifar100',
+            train=False, download=True,
+            transform=test_transform_cifar100)
+    else:
+        raise Exception(f"Unknown in-distribution dataset: {data_in}.")
 
     if data_name == 'Gaussian' or data_name == 'Uniform':
         normalizer = Normalizer(r_mean, g_mean, b_mean, r_std, g_std, b_std)
         outlier_loader = generating_loaders_dict[data_name](
             batch_size=batch_size, num_batches=int(10000 / batch_size),
             transformers=[normalizer])
-    else:
+    elif data_name == 'Imagenet':
         outlier_set = torchvision.datasets.ImageFolder(
-            f'{data_dir}/{data_name}', transform=test_transform)
+            f'{data_dir}/{data_name}', transform=test_transform_cifar10)
         outlier_loader = DataLoader(outlier_set, batch_size=batch_size,
                                     shuffle=False, num_workers=4)
+    elif data_name == 'SVHN':
+        transform = transforms.Compose(
+            [transforms.ToTensor(),
+             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+        )
+        trainset = torchvision.datasets.SVHN(
+            root=f'{data_dir}/{data_name}', split="train", download=True,
+            transform=transform
+        )
+        kwargs = {"num_workers": 4, "pin_memory": True}
+        train_loader = torch.utils.data.DataLoader(
+            trainset, batch_size=batch_size, shuffle=True, **kwargs
+        )
+        testset = torchvision.datasets.SVHN(
+            root=f'{data_dir}/{data_name}', split="test", download=True,
+            transform=transform
+        )
+        test_loader = torch.utils.data.DataLoader(
+            testset, batch_size=batch_size, shuffle=True, **kwargs
+        )
+        outlier_set = testset
+        outlier_loader = test_loader
+    else:
+        raise Exception(f"Unsupported OOD dataset: {data_name}.")
 
     test_indices = list(range(len(test_set_in)))
     validation_set_in = Subset(test_set_in, test_indices[:1000])
@@ -161,6 +231,7 @@ def main():
 
     data_dir = args.data_dir
     data_name = args.out_dataset
+    data_in = args.in_dataset
     batch_size = args.batch_size
 
     train = args.train
@@ -210,18 +281,16 @@ def main():
 
     optimizer = optim.SGD(parameters, lr=0.1, momentum=0.9,
                           weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer,
-                                               milestones=[int(epochs * 0.5),
-                                                           int(epochs * 0.75)],
-                                               gamma=0.1)
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=[int(epochs * 0.5), int(epochs * 0.75)],
+        gamma=0.1)
 
     h_optimizer = optim.SGD(
         h_parameters, lr=0.1, momentum=0.9)  # No weight decay
     h_scheduler = optim.lr_scheduler.MultiStepLR(
-        h_optimizer,
-        milestones=[int(epochs * 0.5),
-                    int(epochs * 0.75)],
-        gamma=0.1)
+        h_optimizer, gamma=0.1,
+        milestones=[int(epochs * 0.5), int(epochs * 0.75)], )
 
     # Load the model (capable of resuming training or inference)
     # from the checkpoint file
@@ -242,7 +311,7 @@ def main():
 
     # get outlier data
     train_data, val_data, test_data, open_data = get_datasets(
-        data_dir, data_name, batch_size)
+        data_dir, data_name, batch_size, data_in)
 
     criterion = losses_dict[loss_type]
 
