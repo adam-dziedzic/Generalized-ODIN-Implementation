@@ -1,6 +1,7 @@
-models/
 data/
-figures/
+__pycache__/
+experiments/
+
 .idea
 .idea/
 .idea/*

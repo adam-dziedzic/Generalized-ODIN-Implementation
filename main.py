@@ -12,7 +12,6 @@ Created on Sat Sep 19 20:55:56 2015
 @author: liangshiyu
 """
 
-import argparse
 import os
 
 import numpy as np
@@ -21,19 +20,17 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from sklearn.metrics import roc_auc_score, roc_curve
 from torch.autograd import Variable
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from deconfnet import DeconfNet, CosineDeconf, InnerDeconf, EuclideanDeconf
-from densenet import DenseNet3
-from generatingloaders import Normalizer, GaussianLoader, UniformLoader
-from resnet import ResNet34
-from wideresnet import WideResNet
-from getpass import getuser
-
-user = getuser()
+from calculate_metrics import calc_auroc, calc_tnr
+from generate_loaders import Normalizer, GaussianLoader, UniformLoader
+from nets.deconfnet import DeconfNet, CosineDeconf, InnerDeconf, EuclideanDeconf
+from nets.densenet import DenseNet
+from nets.resnet import ResNet34
+from nets.wideresnet import WideResNet
+from parameters import get_args
 
 r_mean = 125.3 / 255
 g_mean = 123.0 / 255
@@ -92,61 +89,9 @@ generating_loaders_dict = {
 }
 
 
-def get_args():
-    parser = argparse.ArgumentParser(
-        description='Pytorch Detecting Out-of-distribution examples in neural networks')
-
-    # Device arguments
-    parser.add_argument('--gpu', default=0, type=int,
-                        help='gpu index')
-
-    # Model loading arguments
-    parser.add_argument('--load-model', action='store_true')
-    parser.add_argument('--model-dir', default='./models', type=str,
-                        help='model name for saving')
-
-    # Architecture arguments
-    parser.add_argument('--architecture', default='densenet', type=str,
-                        help='underlying architecture (densenet | resnet | wideresnet)')
-    parser.add_argument('--similarity', default='cosine', type=str,
-                        help='similarity function for decomposed confidence numerator (cosine | inner | euclid | baseline)')
-    parser.add_argument('--loss-type', default='ce', type=str,
-                        help='ce|kliep')
-
-    # Data loading arguments
-    parser.add_argument('--in-dataset',
-                        default='CIFAR10',
-                        type=str,
-                        help='in-distribution dataset')
-    parser.add_argument('--data-dir', default=f'/home/{user}/data', type=str)
-    parser.add_argument('--out-dataset',
-                        # default='Imagenet',
-                        default='SVHN',
-                        type=str,
-                        help='out-of-distribution dataset')
-    parser.add_argument('--batch-size', default=64, type=int,
-                        help='batch size')
-
-    # Training arguments
-    parser.add_argument('--no-train', action='store_false', dest='train')
-    parser.add_argument('--weight-decay', default=0.0001, type=float,
-                        help='weight decay during training')
-    parser.add_argument('--epochs', default=300, type=int,
-                        help='number of epochs during training')
-
-    # Testing arguments
-    parser.add_argument('--no-test', action='store_false', dest='test')
-    parser.add_argument('--magnitudes', nargs='+',
-                        default=[0, 0.0025, 0.005, 0.01, 0.02, 0.04, 0.08],
-                        type=float,
-                        help='perturbation magnitudes')
-
-    parser.set_defaults(argument=True)
-    return parser.parse_args()
-
-
 def get_datasets(data_dir, data_name, batch_size, data_in):
     if data_in == 'CIFAR10':
+        num_classes = 10
         train_set_in = torchvision.datasets.CIFAR10(
             root=f'{data_dir}/cifar10',
             train=True, download=True,
@@ -156,7 +101,7 @@ def get_datasets(data_dir, data_name, batch_size, data_in):
             train=False, download=True,
             transform=test_transform_cifar10)
     elif data_in == 'CIFAR100':
-
+        num_classes = 100
         train_set_in = torchvision.datasets.CIFAR10(
             root=f'{data_dir}/cifar100',
             train=True, download=True,
@@ -198,7 +143,6 @@ def get_datasets(data_dir, data_name, batch_size, data_in):
         test_loader = torch.utils.data.DataLoader(
             testset, batch_size=batch_size, shuffle=True, **kwargs
         )
-        outlier_set = testset
         outlier_loader = test_loader
     else:
         raise Exception(f"Unsupported OOD dataset: {data_name}.")
@@ -214,7 +158,7 @@ def get_datasets(data_dir, data_name, batch_size, data_in):
     test_loader_in = DataLoader(test_set_in, batch_size=batch_size,
                                 shuffle=False, num_workers=4)
 
-    return train_loader_in, validation_loader_in, test_loader_in, outlier_loader
+    return train_loader_in, validation_loader_in, test_loader_in, outlier_loader, num_classes
 
 
 def main():
@@ -247,12 +191,15 @@ def main():
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
+    train_data, val_data, test_data, open_data, num_classes = get_datasets(
+        data_dir, data_name, batch_size, data_in)
+
     if architecture == 'densenet':
-        underlying_net = DenseNet3(depth=100, num_classes=10)
+        underlying_net = DenseNet(num_classes=num_classes)
     elif architecture == 'resnet':
-        underlying_net = ResNet34()
+        underlying_net = ResNet34(num_classes=num_classes)
     elif architecture == 'wideresnet':
-        underlying_net = WideResNet(depth=28, num_classes=10, widen_factor=10)
+        underlying_net = WideResNet(num_classes=num_classes)
 
     underlying_net.to(device)
 
@@ -260,14 +207,16 @@ def main():
     baseline = (similarity == 'baseline')
 
     if baseline:
-        h = InnerDeconf(underlying_net.output_size, 10)
+        h = InnerDeconf(in_features=underlying_net.output_size,
+                        num_classes=num_classes)
     else:
-        h = h_dict[similarity](underlying_net.output_size, 10)
+        h = h_dict[similarity](in_features=underlying_net.output_size,
+                               num_classes=num_classes)
 
     h.to(device)
 
-    deconf_net = DeconfNet(underlying_net, underlying_net.output_size, 10, h,
-                           baseline)
+    deconf_net = DeconfNet(underlying_net, underlying_net.output_size,
+                           num_classes=num_classes, h=h, baseline=baseline)
 
     deconf_net.to(device)
 
@@ -287,7 +236,7 @@ def main():
         gamma=0.1)
 
     h_optimizer = optim.SGD(
-        h_parameters, lr=0.1, momentum=0.9)  # No weight decay
+        h_parameters, lr=0.1, momentum=0.9, weight_decay=0)  # No weight decay
     h_scheduler = optim.lr_scheduler.MultiStepLR(
         h_optimizer, gamma=0.1,
         milestones=[int(epochs * 0.5), int(epochs * 0.75)], )
@@ -295,8 +244,11 @@ def main():
     # Load the model (capable of resuming training or inference)
     # from the checkpoint file
 
+    suffix = f"-{similarity}-{architecture}"
+    file_name = f'{model_dir}/checkpoint{suffix}.pth'
     if load_model:
-        checkpoint = torch.load(f'{model_dir}/checkpoint.pth')
+        print(f'Loading model: {file_name}.')
+        checkpoint = torch.load(file_name)
 
         epoch_start = checkpoint['epoch']
         optimizer.load_state_dict(checkpoint['optimizer'])
@@ -306,12 +258,9 @@ def main():
         h_scheduler.load_state_dict(checkpoint['h_scheduler'])
         epoch_loss = checkpoint['epoch_loss']
     else:
+        print('Starting from scratch.')
         epoch_start = 0
         epoch_loss = None
-
-    # get outlier data
-    train_data, val_data, test_data, open_data = get_datasets(
-        data_dir, data_name, batch_size, data_in)
 
     criterion = losses_dict[loss_type]
 
@@ -360,10 +309,11 @@ def main():
                 'h_scheduler': h_scheduler.state_dict(),
                 'epoch_loss': epoch_loss,
             }
-            torch.save(checkpoint,
-                       f'{model_dir}/checkpoint.pth')  # For continuing training or inference
+            # For continuing training or inference
+            torch.save(checkpoint, file_name)
+            # For exporting / sharing / inference only
             torch.save(deconf_net.state_dict(),
-                       f'{model_dir}/model.pth')  # For exporting / sharing / inference only
+                       f'{model_dir}/model{suffix}.pth')
 
         if epoch_loss is None:
             epoch_bar.set_description(
@@ -376,62 +326,50 @@ def main():
     if test:
         deconf_net.eval()
         best_val_score = None
-        best_auc = None
+        best_auroc = None
 
-        for score_func in ['h', 'g', 'logit']:
+        # score_functions = ['h', 'g', 'logit']
+        score_functions = ['h']
+        for score_func in score_functions:
             print(f'Score function: {score_func}')
             for noise_magnitude in noise_magnitudes:
                 print(f'Noise magnitude {noise_magnitude:.5f}         ')
-                validation_results = np.average(
-                    testData(deconf_net, device, val_data, noise_magnitude,
-                             criterion, score_func, title='Validating'))
-                print('ID Validation Score:', validation_results)
 
-                id_test_results = testData(deconf_net, device, test_data,
-                                           noise_magnitude, criterion,
-                                           score_func, title='Testing ID')
+                id_val_results = generate_scores(
+                    deconf_net, device, val_data, noise_magnitude,
+                    criterion, score_func, title='Validating')
+                validation_results = np.average(id_val_results)
+                print('average id_val scores: ', validation_results)
 
-                ood_test_results = testData(deconf_net, device, open_data,
-                                            noise_magnitude, criterion,
-                                            score_func, title='Testing OOD')
+                id_test_results = generate_scores(
+                    deconf_net, device, test_data, noise_magnitude, criterion,
+                    score_func, title='Testing ID')
+                print('average id_test scores: ', np.average(id_test_results))
+
+                ood_test_results = generate_scores(
+                    deconf_net, device, open_data, noise_magnitude, criterion,
+                    score_func, title='Testing OOD')
+                print('average ood scores: ', np.average(ood_test_results))
+
                 auroc = calc_auroc(id_test_results, ood_test_results) * 100
                 tnrATtpr95 = calc_tnr(id_test_results, ood_test_results)
                 print('AUROC:', auroc, 'TNR@TPR95:', tnrATtpr95)
-                if best_auc is None:
-                    best_auc = auroc
+
+                if best_auroc is None:
+                    best_auroc = auroc
                 else:
-                    best_auc = max(best_auc, auroc)
+                    best_auroc = max(best_auroc, auroc)
                 if best_val_score is None or validation_results > best_val_score:
                     best_val_score = validation_results
-                    best_val_auc = auroc
+                    best_val_auroc = auroc
                     best_tnr = tnrATtpr95
 
-        print('supposedly best auc: ', best_val_auc, ' and tnr@tpr95 ',
-              best_tnr)
-        print('true best auc:', best_auc)
+        print('best auroc: ', best_val_auroc, ' and tnr@tpr95 ', best_tnr)
+        print('true best auroc:', best_auroc)
 
 
-def calc_tnr(id_test_results, ood_test_results):
-    scores = np.concatenate((id_test_results, ood_test_results))
-    trues = np.array(
-        ([1] * len(id_test_results)) + ([0] * len(ood_test_results)))
-    fpr, tpr, thresholds = roc_curve(trues, scores)
-    return 1 - fpr[np.argmax(tpr >= .95)]
-
-
-def calc_auroc(id_test_results, ood_test_results):
-    # calculate the AUROC
-    scores = np.concatenate((id_test_results, ood_test_results))
-    print(scores)
-    trues = np.array(
-        ([1] * len(id_test_results)) + ([0] * len(ood_test_results)))
-    result = roc_auc_score(trues, scores)
-
-    return result
-
-
-def testData(model, CUDA_DEVICE, data_loader, noise_magnitude, criterion,
-             score_func='h', title='Testing'):
+def generate_scores(model, CUDA_DEVICE, data_loader, noise_magnitude, criterion,
+                    score_func='h', title='Testing'):
     model.eval()
     num_batches = len(data_loader)
     results = []

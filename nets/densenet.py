@@ -87,10 +87,10 @@ class DenseBlock(nn.Module):
         return self.layer(x)
 
 
-class DenseNet3(nn.Module):
-    def __init__(self, depth, num_classes, growth_rate=12,
+class DenseNet(nn.Module):
+    def __init__(self, depth=100, num_classes=10, growth_rate=12,
                  reduction=0.5, bottleneck=True, dropRate=0.0):
-        super(DenseNet3, self).__init__()
+        super(DenseNet, self).__init__()
         in_planes = 2 * growth_rate
         n = (depth - 4) / 3
         if bottleneck == True:
