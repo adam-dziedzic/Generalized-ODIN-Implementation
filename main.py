@@ -200,6 +200,8 @@ def main():
         underlying_net = ResNet34(num_classes=num_classes)
     elif architecture == 'wideresnet':
         underlying_net = WideResNet(num_classes=num_classes)
+    else:
+        raise Exception(f"Unsupported architecture: {architecture}.")
 
     underlying_net.to(device)
 
