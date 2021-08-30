@@ -353,6 +353,9 @@ def main():
                     score_func, title='Testing OOD')
                 print('average ood scores: ', np.average(ood_test_results))
 
+                print('# of id_test_results: ', len(id_test_results))
+                print('# of ood_test_results: ', len(ood_test_results))
+
                 auroc = calc_auroc(id_test_results, ood_test_results) * 100
                 tnrATtpr95 = calc_tnr(id_test_results, ood_test_results)
                 print('AUROC:', auroc, 'TNR@TPR95:', tnrATtpr95)
